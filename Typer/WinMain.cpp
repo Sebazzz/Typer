@@ -7,6 +7,7 @@ const wchar_t TYPER_WINDOWCLAZZ[] = L"Typer Main Window";
 typedef struct
 {
 	wchar_t filename[MAX_PATH];
+	bool bHasOpenFile;
 } DOCUMENT_STATE;
 
 typedef struct
@@ -17,7 +18,6 @@ typedef struct
 	HWND hWndEdit;
 	HICON hIcon;
 	HFONT hFont;
-	LPWSTR lpStrFileName;
 } APP_STATE;
 
 APP_STATE state;
@@ -51,6 +51,119 @@ DWORD Typer_ShowIOError(LPCWSTR lpStrFileName)
 	return err;	
 }
 
+bool Typer_SaveWithFileName(LPWSTR lpStrFileName)
+{
+
+	HANDLE hOpenFile = CreateFile(lpStrFileName, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+
+	if (hOpenFile == INVALID_HANDLE_VALUE)
+	{
+		Typer_ShowIOError(lpStrFileName);
+		return false;
+	}
+	
+	HANDLE hProcessHeap = GetProcessHeap();
+	if (!hProcessHeap)
+	{
+		Typer_ShowIOError(lpStrFileName);
+		CloseHandle(hOpenFile);
+		return false;
+	}
+
+	const SIZE_T szBufferSize = sizeof(wchar_t) * 1024 * 1024;
+	BYTE* pMem = static_cast<BYTE*>(HeapAlloc(hProcessHeap, HEAP_ZERO_MEMORY, szBufferSize));
+	if (!pMem)
+	{
+		Typer_ShowIOError(lpStrFileName);
+		CloseHandle(hOpenFile);
+		return false;
+	}
+	
+	BYTE* pos = pMem;
+
+	int length = GetWindowTextA(state.hWndEdit, reinterpret_cast<LPSTR>(pos), szBufferSize);
+
+	while (pos != (pMem + length))
+	{
+		DWORD numBytesWritten = 0;
+		if (!WriteFile(hOpenFile, pos, (pMem + length) - pos - numBytesWritten, &numBytesWritten, nullptr))
+		{
+			Typer_ShowIOError(lpStrFileName);
+			HeapFree(hProcessHeap, 0, pMem);
+			CloseHandle(hOpenFile);
+			return false;
+		}
+		
+		pos += numBytesWritten;
+	}
+
+	CloseHandle(hOpenFile);
+	SetWindowTextA(state.hWndEdit, reinterpret_cast<LPCSTR>(pMem));
+	HeapFree(hProcessHeap, 0, pMem);
+
+	return true;
+}
+
+void Typer_RecordOpenFile(LPWSTR lpOpenFileName)
+{
+	ZeroMemory(state.document.filename, MAX_PATH);
+	wcscpy_s(state.document.filename, lpOpenFileName);
+	state.document.bHasOpenFile = true;
+
+	const SIZE_T szBuf = MAX_PATH + 64;
+	wchar_t buf[szBuf];
+	ZeroMemory(buf, szBuf);
+	wcscat_s(buf, L"Typer - ");
+	wcscat_s(buf, state.document.filename);
+	
+	SetWindowTextW(state.hWnd, buf);
+}
+
+bool Typer_SaveAs(bool bSaveFileName)
+{
+	// Get the filename from the user
+	wchar_t filename[MAX_PATH] = {0};
+	
+	OPENFILENAME ofn = { 0 };
+	ofn.lStructSize = sizeof(ofn);
+	ofn.hInstance = state.hInstance;
+	ofn.hwndOwner = state.hWnd;
+	ofn.lpstrTitle = L"Select a path to save the from Typer";
+	ofn.lpstrFilter = L"All Files (*.*)\0*.*\0\0";
+
+	ofn.nMaxFile = sizeof(filename);
+	ofn.lpstrFile = filename;
+
+	ofn.Flags = OFN_CREATEPROMPT | OFN_HIDEREADONLY | OFN_NODEREFERENCELINKS | OFN_NONETWORKBUTTON | OFN_NOREADONLYRETURN | OFN_OVERWRITEPROMPT;
+
+	if (!GetSaveFileName(&ofn))
+	{
+		return true;
+	}
+
+	if (Typer_SaveWithFileName(ofn.lpstrFile) && bSaveFileName)
+	{
+		Typer_RecordOpenFile(ofn.lpstrFile);
+	}
+
+	return true;
+}
+
+bool Typer_SaveAs()
+{
+	return Typer_SaveAs(false);
+}
+
+bool Typer_Save()
+{
+	if (state.document.bHasOpenFile)
+	{
+		return Typer_SaveWithFileName(state.document.filename);
+	}
+	
+	Typer_SaveAs(true);
+}
+
 bool Typer_OpenFile()
 {
 	wchar_t filename[MAX_PATH] = {0};
@@ -65,7 +178,7 @@ bool Typer_OpenFile()
 	ofn.nMaxFile = sizeof(filename);
 	ofn.lpstrFile = filename;
 
-	ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NODEREFERENCELINKS | OFN_NONETWORKBUTTON | OFN_PATHMUSTEXIST | OFN_SHOWHELP;
+	ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NODEREFERENCELINKS | OFN_NONETWORKBUTTON | OFN_PATHMUSTEXIST;
 
 	if (!GetOpenFileName(&ofn))
 	{
@@ -90,6 +203,13 @@ bool Typer_OpenFile()
 	}
 
 	BYTE* pMem = static_cast<BYTE*>(HeapAlloc(hProcessHeap, HEAP_ZERO_MEMORY, sizeof(wchar_t) * 1024 * 1024));
+	if (!pMem)
+	{
+		Typer_ShowIOError(lpStrFileName);
+		CloseHandle(hOpenFile);
+		return false;
+	}
+	
 	BYTE* pos = pMem;
 
 	while (true)
@@ -114,8 +234,8 @@ bool Typer_OpenFile()
 	SetWindowTextA(state.hWndEdit, reinterpret_cast<LPCSTR>(pMem));
 	HeapFree(hProcessHeap, 0, pMem);
 
-    state.lpStrFileName = lpStrFileName;
-
+	Typer_RecordOpenFile(ofn.lpstrFile);
+	
 	return true;
 }
 
@@ -169,6 +289,14 @@ LRESULT CALLBACK Typer_WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 			case ID_TYPER_FILE_OPEN:
 				Typer_OpenFile();
 				break;
+
+			case ID_TYPER_FILE_SAVE:
+				Typer_Save();
+				break;
+
+			case ID_TYPER_FILE_SAVEAS:
+				Typer_SaveAs();
+				break;
 				
 			case ID_TYPER_FILE_EXIT:
 				PostMessage(hWnd, WM_CLOSE, 0, 0);
@@ -211,7 +339,7 @@ ATOM Typer_RegisterClass(HINSTANCE hInstance)
 	wnd.lpszClassName = TYPER_WINDOWCLAZZ;
 	wnd.hInstance = hInstance;
 	wnd.lpfnWndProc = Typer_WndProc;
-	wnd.lpszMenuName = MAKEINTRESOURCE(IDR_MENU_TYPER_MAIN);
+	wnd.lpszMenuName = MAKEINTRESOURCE(IDR_TYPER_MENU);
 
 	return RegisterClassEx(&wnd);
 }
@@ -245,10 +373,9 @@ DWORD Typer_ShowInitError(LPCWSTR stage)
 	return err;	
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR pCmdLine, int nCmdShow)
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR pCmdLine, int nCmdShow)
 {
 	ZeroMemory(&state, sizeof(state));
-	InitCommonControls();
 	
 	const ATOM aWndClazz = Typer_RegisterClass(hInstance);
 	if (!aWndClazz)
@@ -256,7 +383,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR pCmdLin
 		return Typer_ShowInitError(L"Failed to register window class");
 	}
 
-	
 	HWND hWnd = CreateWindowEx(
 		0,
 		TYPER_WINDOWCLAZZ,
@@ -289,6 +415,5 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR pCmdLin
 		DispatchMessage(&msg);
 	}	
 
-	
 	return 0;
 }
